@@ -24,6 +24,10 @@ from rich.markdown import Markdown
 from src.citations import CitationManager
 from src.generator import answer_with_citations
 
+# Cache Imports
+from src.query_cache import QueryCache
+from src.embedder import SentenceTransformer
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the application."""
     parser = argparse.ArgumentParser(
@@ -84,6 +88,26 @@ def parse_args() -> argparse.Namespace:
         default="minimal",
         help="citation format style (default: minimal)"
     )
+
+    # Add cache argument group
+    cache_group = parser.add_argument_group("cache options")
+    cache_group.add_argument(
+        "--enable_cache",
+        action="store_true",
+        help="enable query caching for faster responses"
+    )
+    cache_group.add_argument(
+        "--cache_threshold",
+        type=float,
+        default=0.85,
+        help="similarity threshold for cache hits (0.0-1.0, default: 0.85)"
+    )
+    cache_group.add_argument(
+        "--clear_cache",
+        action="store_true",
+        help="clear the cache before starting"
+    )
+
     return parser.parse_args()
 
 
@@ -335,9 +359,30 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
 
     # Load artifacts, initialize retrievers and rankers once before the loop.
     print("Welcome to Tokensmith! Initializing chat...")
+
+    # Initializing the cache
+    cache = None
+    cache_embedder = None
+    if args.enable_cache:
+        cache = QueryCache(
+            cache_dir="cache",
+            similarity_threshold=args.cache_threshold,
+            max_cache_size=100
+        )
+        
+        if args.clear_cache:
+            cache.clear()
+            print("[Cache] Cache cleared as requested")
+        
+        cache_embedder = SentenceTransformer(cfg.embed_model)
+        print(f"[Cache] Caching enabled with threshold {args.cache_threshold}")
+        
+        # Print cache stats if cache exists
+        stats = cache.get_stats()
+        if stats['size'] > 0:
+            print(f"[Cache] Loaded cache with {stats['size']} entries")
+
     try:
-        # Disabled till we fix the core pipeline
-        # cfg = planner.plan(q)
         artifacts_dir = cfg.make_artifacts_directory()
         faiss_index, bm25_index, chunks, sources = load_artifacts(
             artifacts_dir=artifacts_dir, 
@@ -376,19 +421,69 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
         sys.exit(1)
 
     print("Initialization complete. You can start asking questions!")
-    print(f"Citation style: {args.citation_style}") # added this to ensure user is aware of their citation style
+    print(f"Citation style: {args.citation_style}")
+    if args.enable_cache:
+        print(f"Cache: ENABLED (threshold: {args.cache_threshold})")
     print("Type 'exit' or 'quit' to end the session.")
+    print("Type 'cache stats' to view cache statistics.\n")
     
     while True:
         try:
-            q = input("\nAsk > ").strip()
+            q = input("Ask > ").strip()
             if not q:
                 continue
             if q.lower() in {"exit", "quit"}:
+                if cache:
+                    stats = cache.get_stats()
+                    print(f"\n[Cache] Session stats: {stats['size']} cached queries, {stats['total_accesses']} total accesses")
                 print("Goodbye!")
                 break
+            
+            # Special command to view cache stats
+            if q.lower() == "cache stats" and cache:
+                stats = cache.get_stats()
+                console.print("\n[bold cyan]Cache Statistics:[/bold cyan]")
+                console.print(f"  Size: {stats['size']} queries")
+                console.print(f"  Total accesses: {stats['total_accesses']}")
+                console.print(f"  Avg accesses per query: {stats['avg_accesses_per_query']:.2f}")
+                console.print(f"  Similarity threshold: {stats['similarity_threshold']}")
+                console.print(f"  Cache directory: {stats['cache_dir']}")
+                continue
 
-            # Get answer with citations
+            # Check cache if enabled
+            cached_result = None
+            query_embedding = None
+            use_cached = False
+
+            if cache and cache_embedder:
+                # Compute query embedding for cache lookup
+                query_embedding = cache_embedder.encode([q])[0]
+                cached_result = cache.get(q, query_embedding)
+                
+                if cached_result:
+                    # Display cached answer with full details
+                    console.print("\n[bold yellow]Serving from Cache[/bold yellow]")
+                    console.print(f"[dim]Original query: {cached_result['original_query']}[/dim]")
+                    console.print(f"[dim]Similarity: {cached_result['similarity_score']:.3f}[/dim]")
+                    console.print(f"[dim]Cached on: {cached_result['timestamp']}[/dim]\n")
+                    
+                    # Display the cached answer
+                    console.print("[bold cyan]==================== CACHED ANSWER ===================[/bold cyan]\n")
+                    console.print(Markdown(cached_result['answer']))
+                    console.print("\n[bold cyan]===================== END OF ANSWER ====================[/bold cyan]\n")
+                    
+                    # Ask user for confirmation
+                    refetch = input("Use cached answer? (Y/n): ").strip().lower()
+                    
+                    if refetch in {'y', 'yes', ''}:
+                        use_cached = True
+                        print("[Cache] Using cached result\n")
+                        # Continue to next iteration - don't generate new answer
+                        continue
+                    else:
+                        print("[Cache] Refetching fresh answer...\n")
+
+            # Generate new answer only if not using cached result
             ans, citation_manager = get_answer(
                 q, cfg, args, logger, console, artifacts=artifacts, is_test_mode=False
             )
@@ -401,7 +496,19 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
                 }
             )
 
+            # Add to cache if enabled and not a cache hit
+            if cache and cache_embedder and query_embedding is not None:
+                cache.add(
+                    query=q,
+                    query_embedding=query_embedding,
+                    answer=ans,
+                    citation_manager=citation_manager
+                )
+
         except KeyboardInterrupt:
+            if cache:
+                stats = cache.get_stats()
+                print(f"\n[Cache] Session stats: {stats['size']} cached queries, {stats['total_accesses']} total accesses")
             print("\nGoodbye!")
             break
         except Exception as e:
