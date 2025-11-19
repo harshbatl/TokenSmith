@@ -1,6 +1,8 @@
 import textwrap, re
 from llama_cpp import Llama
 
+from src.citations import CitationManager
+
 ANSWER_START = "<<<ANSWER>>>"
 ANSWER_END   = "<<<END>>>"
 
@@ -146,9 +148,28 @@ def run_llama_cpp(prompt: str, model_path: str, max_tokens: int, temperature: fl
         stop=[ANSWER_END]
     )
 
-def answer(query: str, chunks, model_path: str, max_tokens: int = 300, system_prompt_mode: str = "tutor"):
+def answer(query: str, chunks, model_path: str, max_tokens: int = 300, 
+           system_prompt_mode: str = "tutor"):
     prompt = format_prompt(chunks, query, system_prompt_mode=system_prompt_mode)
     return stream_llama_cpp(prompt, model_path, max_tokens=max_tokens, temperature=0.2)
+
+def answer_with_citations(query: str, chunks, chunk_metadata, model_path: str, 
+                          max_tokens: int = 300, system_prompt_mode: str = "tutor"):
+    # Generate the answer with the citation
+    citation_manager = CitationManager()
+    
+    # Track chunks being used
+    for i, (chunk, meta) in enumerate(zip(chunks, chunk_metadata)):
+        citation_manager.add_chunk(
+            chunk_id=meta.get('chunk_id', i),
+            content=chunk,
+            metadata=meta
+        )
+    
+    prompt = format_prompt(chunks, query, system_prompt_mode=system_prompt_mode)
+    stream = stream_llama_cpp(prompt, model_path, max_tokens=max_tokens, temperature=0.2)
+    
+    return stream, citation_manager
 
 def dedupe_generated_text(text: str) -> str:
     """

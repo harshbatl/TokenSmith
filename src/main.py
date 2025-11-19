@@ -5,7 +5,7 @@ import argparse
 import json
 import pathlib
 import sys
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from rich.live import Live
 
@@ -19,6 +19,10 @@ from src.retriever import apply_seg_filter, BM25Retriever, FAISSRetriever, load_
 from src.query_enhancement import generate_hypothetical_document
 from rich.console import Console
 from rich.markdown import Markdown
+
+# Citation Manager Imports
+from src.citations import CitationManager
+from src.generator import answer_with_citations
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the application."""
@@ -73,6 +77,13 @@ def parse_args() -> argparse.Namespace:
         help="generate visualizations during indexing"
     )
 
+    # Citation Argument for the style user wants
+    parser.add_argument(
+        "--citation_style",
+        choices=["minimal", "detailed", "numbered", "none"],
+        default="minimal",
+        help="citation format style (default: minimal)"
+    )
     return parser.parse_args()
 
 
@@ -144,29 +155,36 @@ def get_answer(
     artifacts: Optional[Dict] = None,
     golden_chunks: Optional[list] = None,
     is_test_mode: bool = False
-) -> str:
+) -> Tuple:
     """
     Run a single query through the pipeline.
-    """    
+    """
+
     chunks = artifacts["chunks"]
     sources = artifacts["sources"]
+    metadata_list = artifacts.get("metadata", []) # Added this for citations
     retrievers = artifacts["retrievers"]
     ranker = artifacts["ranker"]
     
     logger.log_query_start(question)
+    citation_manager = CitationManager()
     
     # Step 1: Get chunks (golden, retrieved, or none)
     chunks_info = None
     hyde_query = None
+    topk_idxs = []  # Initialize to avoid UnboundLocalError
+    
     if golden_chunks and cfg.use_golden_chunks:
         # Use provided golden chunks
         ranked_chunks = golden_chunks
+        topk_idxs = list(range(len(golden_chunks)))  # Create dummy indices
     elif cfg.disable_chunks:
         # No chunks - baseline mode
         ranked_chunks = []
     elif cfg.use_indexed_chunks:
         # Use chunks from the textbook index
         ranked_chunks = use_indexed_chunks(question, chunks, logger)
+        topk_idxs = list(range(len(ranked_chunks)))  # Create dummy indices
     else:
         # Step 0: Query Enhancement (HyDE)
         retrieval_query = question
@@ -220,14 +238,27 @@ def get_answer(
         # Step 3: Final Re-ranking (if enabled)
         # Disabled till we fix the core pipeline
         # ranked_chunks = rerank(question, ranked_chunks, mode=cfg.rerank_mode, top_n=cfg.top_k)
+
+    # Prepare metadata for citations
+    chunk_metadata = []
+    for idx in topk_idxs:
+        meta = metadata_list[idx] if idx < len(metadata_list) else {}
+        chunk_metadata.append(meta)
+        # Track in citation manager
+        citation_manager.add_chunk(
+            chunk_id=idx,
+            content=chunks[idx],
+            metadata=meta
+        )
     
-    # Step 4: Generation
+    # Step 4: Generation with Citations
     model_path = args.model_path or cfg.model_path
     system_prompt = args.system_prompt_mode or cfg.system_prompt_mode
 
-    stream_iter = answer(
+    stream_iter, citation_manager = answer_with_citations(
         question,
         ranked_chunks,
+        chunk_metadata,
         model_path,
         max_tokens=cfg.max_gen_tokens,
         system_prompt_mode=system_prompt,
@@ -239,11 +270,28 @@ def get_answer(
         for delta in stream_iter:
             ans += delta
         ans = dedupe_generated_text(ans)
-        return ans, chunks_info, hyde_query
+        
+        # Add citations
+        citation_style = getattr(args, 'citation_style', 'minimal')
+        if citation_style != 'none':
+            citations = citation_manager.format_citations(citation_style) # defaults to minimal if not specified
+            ans += citations
+        
+        return ans, chunks_info, hyde_query, citation_manager
     else:
         # Accumulate the full text while rendering incremental Markdown chunks
         ans = render_streaming_ans(console, stream_iter)
-    return ans
+        
+        # Add citations after answer
+        citation_style = getattr(args, 'citation_style', 'minimal')
+        if citation_style != 'none':
+            citations = citation_manager.format_citations(citation_style)
+            if console:
+                console.print(Markdown(citations))
+            ans += citations
+        
+        # Return consistent tuple for normal mode
+        return ans, citation_manager
 
 
 def render_streaming_ans(console, stream_iter):
@@ -295,6 +343,14 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
             artifacts_dir=artifacts_dir, 
             index_prefix=args.index_prefix
         )
+        
+        # Load metadata for citations
+        import pickle
+        metadata_path = artifacts_dir / f"{args.index_prefix}_meta.pkl"
+        metadata = []
+        if metadata_path.exists():
+            with open(metadata_path, "rb") as f:
+                metadata = pickle.load(f)
 
         retrievers = [
             FAISSRetriever(faiss_index, cfg.embed_model),
@@ -306,10 +362,11 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
             rrf_k=int(cfg.rrf_k)
         )
         
-        # Package artifacts for reuse
+        # Package artifacts with metadata
         artifacts = {
             "chunks": chunks,
             "sources": sources,
+            "metadata": metadata,
             "retrievers": retrievers,
             "ranker": ranker
         }
@@ -319,7 +376,9 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
         sys.exit(1)
 
     print("Initialization complete. You can start asking questions!")
+    print(f"Citation style: {args.citation_style}") # added this to ensure user is aware of their citation style
     print("Type 'exit' or 'quit' to end the session.")
+    
     while True:
         try:
             q = input("\nAsk > ").strip()
@@ -329,9 +388,18 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
                 print("Goodbye!")
                 break
 
-            # Use the single query function. get_answer also renders the streaming markdown.
-            ans = get_answer(q, cfg, args, logger, console, artifacts=artifacts)
-            logger.log_generation(ans, {"max_tokens": cfg.max_gen_tokens, "model_path": args.model_path or cfg.model_path})
+            # Get answer with citations
+            ans, citation_manager = get_answer(
+                q, cfg, args, logger, console, artifacts=artifacts, is_test_mode=False
+            )
+            
+            logger.log_generation(
+                ans, 
+                {
+                    "max_tokens": cfg.max_gen_tokens, 
+                    "model_path": args.model_path or cfg.model_path,
+                }
+            )
 
         except KeyboardInterrupt:
             print("\nGoodbye!")
