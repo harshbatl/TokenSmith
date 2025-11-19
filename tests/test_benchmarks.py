@@ -206,6 +206,7 @@ def get_tokensmith_answer(question, config, golden_chunks=None):
         metrics=config.get("metrics", ["all"]),
         use_hyde=config.get("use_hyde", False),
         hyde_max_tokens=config.get("hyde_max_tokens", 100),
+        use_indexed_chunks=False
     )
     
     # Print status

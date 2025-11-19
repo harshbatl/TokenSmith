@@ -4,7 +4,7 @@ from llama_cpp import Llama
 from tqdm import tqdm
 
 class SentenceTransformer:
-    def __init__(self, model_path: str, n_ctx: int = 40960, n_threads: int = None):
+    def __init__(self, model_path: str, n_ctx: int = 4096, n_threads: int = None):
         """
         Initialize with a local GGUF model file path.
         

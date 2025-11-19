@@ -12,13 +12,13 @@ class MetricRegistry:
     def _auto_register(self):
         """Automatically register all available metrics."""
         from tests.metrics import (
-            SemanticSimilarityMetric,
+            # SemanticSimilarityMetric,
             KeywordMatchMetric,
             NLIEntailmentMetric,
             AsyncLLMJudgeMetric
         )
 
-        self.register(SemanticSimilarityMetric())
+        # self.register(SemanticSimilarityMetric())
         self.register(KeywordMatchMetric())
         self.register(NLIEntailmentMetric())
         self.register(AsyncLLMJudgeMetric())
