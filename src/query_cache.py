@@ -117,12 +117,13 @@ class QueryCache:
             answer: str,
             chunks_info: Optional[List] = None,
             hyde_query: Optional[str] = None,
-            citation_manager = None):
+            citation_manager = None,
+            confidence: Optional[float] = None):
         
         # Generate unique ID
         query_id = hashlib.md5(query.encode()).hexdigest()[:16]
         
-        # Create cache entry
+        # Create cache entry (with confidence now)
         entry = {
             'query_id': query_id,
             'original_query': query,
@@ -130,7 +131,8 @@ class QueryCache:
             'chunks_info': chunks_info,
             'hyde_query': hyde_query,
             'timestamp': datetime.now().isoformat(),
-            'cache_hit': False
+            'cache_hit': False,
+            'confidence': confidence
         }
         
         # Store citation information if available

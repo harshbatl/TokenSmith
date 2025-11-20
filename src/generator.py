@@ -187,3 +187,53 @@ def dedupe_generated_text(text: str) -> str:
         cleaned.append(line)
         prev = normalized
     return "\n".join(cleaned)
+
+def get_confidence_score(answer: str, query: str, chunks: list, model_path: str) -> float:
+    prompt = textwrap.dedent(f"""
+        <|im_start|>system
+        You are an expert at evaluating answer quality and confidence.
+        <|im_end|>
+        <|im_start|>user
+        Question: {query}
+        
+        Answer provided: {answer[:500]}...
+        
+        Context available: {"Yes, relevant context provided" if chunks else "No context provided"}
+        
+        Rate your confidence in this answer on a scale of 0-100, where:
+        - 90-100: Highly confident, answer is comprehensive and well-supported
+        - 70-89: Confident, answer is accurate but may lack some detail
+        - 50-69: Moderately confident, answer is reasonable but uncertain
+        - 30-49: Low confidence, answer may be incomplete or speculative
+        - 0-29: Very low confidence, answer is likely insufficient
+        
+        Respond with ONLY a number between 0-100. No explanation.
+        <|im_end|>
+        <|im_start|>assistant
+        """).strip()
+    
+    try:
+        model = get_llama_model(model_path)
+        response = model.create_completion(
+            prompt,
+            max_tokens=10,
+            temperature=0.1,
+            stop=["\n", "<|im_end|>"]
+        )
+        
+        # Extract number from response
+        text = response["choices"][0]["text"].strip()
+        match = re.search(r'\b(\d+)\b', text)
+        if match:
+            confidence = int(match.group(1))
+            return min(max(confidence, 0), 100)  # Clamp between 0-100
+        
+    except Exception as e:
+        print(f"[Confidence] Error: {e}")
+    
+    # Default to 50 if scoring fails
+    return 50.0
+
+
+def get_confidence_after_generation(answer: str, query: str, chunks: list, model_path: str) -> float:
+    return get_confidence_score(answer, query, chunks, model_path)

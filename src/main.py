@@ -24,6 +24,9 @@ from rich.markdown import Markdown
 from src.citations import CitationManager
 from src.generator import answer_with_citations
 
+# Confidence Scoring Imports
+from src.generator import get_confidence_after_generation
+
 # Cache Imports
 from src.query_cache import QueryCache
 from src.embedder import SentenceTransformer
@@ -301,6 +304,11 @@ def get_answer(
             citations = citation_manager.format_citations(citation_style) # defaults to minimal if not specified
             ans += citations
         
+        # Get confidence score
+        confidence = get_confidence_after_generation(ans, question, ranked_chunks, model_path)
+        
+        return ans, chunks_info, hyde_query, citation_manager, confidence
+
         return ans, chunks_info, hyde_query, citation_manager
     else:
         # Accumulate the full text while rendering incremental Markdown chunks
@@ -314,8 +322,22 @@ def get_answer(
                 console.print(Markdown(citations))
             ans += citations
         
+        # Get confidence score after generation
+            print("\n[Confidence] Calculating confidence score...")
+            confidence = get_confidence_after_generation(ans, question, ranked_chunks, model_path)
+        
+        # Display confidence with color coding
+        if confidence >= 80:
+            color = "green"
+        elif confidence >= 60:
+            color = "yellow"
+        else:
+            color = "red"
+
+        console.print(f"\n[{color}] Confidence: {confidence}%[/{color}]\n")
+
         # Return consistent tuple for normal mode
-        return ans, citation_manager
+        return ans, citation_manager, confidence
 
 
 def render_streaming_ans(console, stream_iter):
@@ -466,6 +488,17 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
                     console.print(f"[dim]Original query: {cached_result['original_query']}[/dim]")
                     console.print(f"[dim]Similarity: {cached_result['similarity_score']:.3f}[/dim]")
                     console.print(f"[dim]Cached on: {cached_result['timestamp']}[/dim]\n")
+
+                    # Display confidence if available
+                    if cached_result.get('confidence') is not None:
+                        conf = cached_result['confidence']
+                        if conf >= 80:
+                            console.print(f"[dim green]Confidence: {conf}%[/dim green]")
+                        elif conf >= 60:
+                            console.print(f"[dim yellow]Confidence: {conf}%[/dim yellow]")
+                        else:
+                            console.print(f"[dim red]Confidence: {conf}%[/dim red]")
+                    console.print()
                     
                     # Display the cached answer
                     console.print("[bold cyan]==================== CACHED ANSWER ===================[/bold cyan]\n")
@@ -484,7 +517,7 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
                         print("[Cache] Refetching fresh answer...\n")
 
             # Generate new answer only if not using cached result
-            ans, citation_manager = get_answer(
+            ans, citation_manager, confidence = get_answer(
                 q, cfg, args, logger, console, artifacts=artifacts, is_test_mode=False
             )
             
@@ -502,7 +535,8 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
                     query=q,
                     query_embedding=query_embedding,
                     answer=ans,
-                    citation_manager=citation_manager
+                    citation_manager=citation_manager,
+                    confidence=confidence  # Add confidence to cache
                 )
 
         except KeyboardInterrupt:
